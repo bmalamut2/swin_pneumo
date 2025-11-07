@@ -272,6 +272,7 @@ class SMPWithAux(nn.Module):
         setter = getattr(timm_model, "set_input_size", None)
         patch_embed = getattr(timm_model, "patch_embed", None)
 
+        adjusted = False
         try:
             if callable(setter):
                 kwargs = {"img_size": size}
@@ -281,12 +282,16 @@ class SMPWithAux(nn.Module):
                     if win is not None:
                         kwargs["window_size"] = win
                 setter(**kwargs)
+                adjusted = True
             elif hasattr(patch_embed, "set_input_size"):
                 patch_embed.set_input_size(img_size=size)
+                adjusted = True
             else:
                 return
             if hasattr(patch_embed, "strict_img_size"):
                 patch_embed.strict_img_size = True
+            if adjusted and not callable(setter):
+                self._update_swin_stages(timm_model, patch_embed)
             print(f"[info] Adjusted encoder input size to {size[0]}x{size[1]}")
         except Exception as e:
             print(f"[warn] Failed to set encoder input size to {size}: {e}")
@@ -316,6 +321,60 @@ class SMPWithAux(nn.Module):
             except (TypeError, ValueError):
                 continue
         return None
+
+    def _collect_swin_stages(self, timm_model):
+        stages = []
+        for name, module in timm_model.named_children():
+            if name.startswith("layers"):
+                stages.append((name, module))
+        if not stages:
+            return []
+        stages.sort(key=lambda item: int(item[0].split("_")[-1]) if "_" in item[0] else item[0])
+        return [m for _, m in stages]
+
+    def _infer_stage_window_size(self, stage):
+        blocks = getattr(stage, "blocks", None)
+        if blocks is None:
+            return None
+        try:
+            if len(blocks) == 0:
+                return None
+        except TypeError:
+            return None
+        win = getattr(blocks[0], "window_size", None)
+        if isinstance(win, (tuple, list)):
+            return tuple(int(x) for x in win)
+        if win is None:
+            return None
+        try:
+            val = int(win)
+            return (val, val)
+        except (TypeError, ValueError):
+            return None
+
+    def _update_swin_stages(self, timm_model, patch_embed):
+        patch_grid = getattr(patch_embed, "grid_size", None)
+        if patch_grid is None:
+            return
+        stages = self._collect_swin_stages(timm_model)
+        if not stages:
+            return
+        for idx, stage in enumerate(stages):
+            if not hasattr(stage, "set_input_size"):
+                continue
+            scale = 2 ** max(idx - 1, 0)
+            feat_size = (
+                patch_grid[0] // max(1, scale),
+                patch_grid[1] // max(1, scale),
+            )
+            win = self._infer_stage_window_size(stage)
+            try:
+                if win is None:
+                    stage.set_input_size(feat_size=feat_size, window_size=(7, 7))
+                else:
+                    stage.set_input_size(feat_size=feat_size, window_size=win)
+            except Exception as err:
+                print(f"[warn] Could not update stage {idx} input size: {err}")
 
 
 # ---------------------------
