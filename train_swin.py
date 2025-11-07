@@ -200,7 +200,12 @@ class SMPWithAux(nn.Module):
     Wrapper that returns (seg_logits, cls_logit).
     Uses FPN decoder for broad compatibility in segmentation_models_pytorch.
     """
-    def __init__(self, encoder_name="timm-swin_tiny_patch4_window7_224", weights="imagenet"):
+    def __init__(
+        self,
+        encoder_name="timm-swin_tiny_patch4_window7_224",
+        weights="imagenet",
+        encoder_img_size=None,
+    ):
         super().__init__()
         aux_params = dict(pooling="avg", dropout=0.25, classes=1, activation=None)
         # Try the provided encoder_name; if it fails due to naming differences, try swapping timm<->tu
@@ -231,6 +236,7 @@ class SMPWithAux(nn.Module):
                 )
             else:
                 raise
+        self._maybe_set_encoder_img_size(encoder_img_size)
 
     def forward(self, x):
         out = self.net(x)
@@ -240,6 +246,75 @@ class SMPWithAux(nn.Module):
             seg = out
             cls = seg.mean(dim=[2,3], keepdim=False)   # fallback proxy
         return seg, cls
+
+    def _maybe_set_encoder_img_size(self, encoder_img_size):
+        if encoder_img_size is None:
+            return
+        if isinstance(encoder_img_size, (tuple, list)):
+            if len(encoder_img_size) != 2:
+                print(f"[warn] encoder_img_size tuple must have two entries, got {encoder_img_size}")
+                return
+            size = tuple(int(s) for s in encoder_img_size)
+        else:
+            try:
+                val = int(encoder_img_size)
+            except (TypeError, ValueError):
+                print(f"[warn] encoder_img_size must be int or tuple, got {encoder_img_size}")
+                return
+            size = (val, val)
+
+        encoder = getattr(self.net, "encoder", None)
+        timm_model = getattr(encoder, "model", None) if encoder is not None else None
+        if timm_model is None:
+            return
+
+        setter = getattr(timm_model, "set_input_size", None)
+        patch_embed = getattr(timm_model, "patch_embed", None)
+
+        try:
+            if callable(setter):
+                kwargs = {"img_size": size}
+                class_name = timm_model.__class__.__name__.lower()
+                if "swin" in class_name:
+                    win = self._infer_window_size(timm_model)
+                    if win is not None:
+                        kwargs["window_size"] = win
+                setter(**kwargs)
+            elif hasattr(patch_embed, "set_input_size"):
+                patch_embed.set_input_size(img_size=size)
+            else:
+                return
+            if hasattr(patch_embed, "strict_img_size"):
+                patch_embed.strict_img_size = True
+            print(f"[info] Adjusted encoder input size to {size[0]}x{size[1]}")
+        except Exception as e:
+            print(f"[warn] Failed to set encoder input size to {size}: {e}")
+
+    def _infer_window_size(self, timm_model):
+        layers = getattr(timm_model, "layers", None)
+        if layers is None:
+            return None
+        for stage in layers:
+            blocks = getattr(stage, "blocks", None)
+            if blocks is None:
+                continue
+            try:
+                if len(blocks) == 0:
+                    continue
+            except TypeError:
+                continue
+            first_block = blocks[0]
+            win = getattr(first_block, "window_size", None)
+            if win is None:
+                continue
+            if isinstance(win, (tuple, list)):
+                return tuple(int(x) for x in win)
+            try:
+                val = int(win)
+                return (val, val)
+            except (TypeError, ValueError):
+                continue
+        return None
 
 
 # ---------------------------
@@ -363,7 +438,12 @@ def train(args):
         pin_memory=True
     )
 
-    model = SMPWithAux(encoder_name=args.encoder, weights=args.encoder_weights).to(device)
+    encoder_img_size = args.encoder_img_size or args.img_size
+    model = SMPWithAux(
+        encoder_name=args.encoder,
+        weights=args.encoder_weights,
+        encoder_img_size=encoder_img_size,
+    ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scaler = GradScaler()
 
@@ -489,7 +569,12 @@ def predict_to_pngs(args, weights_path, out_dir="pred_masks"):
     df = pd.read_csv(test_csv)
     id_col = detect_id_column(df)
 
-    model = SMPWithAux(encoder_name=args.encoder, weights=args.encoder_weights).to(device)
+    encoder_img_size = args.encoder_img_size or args.img_size
+    model = SMPWithAux(
+        encoder_name=args.encoder,
+        weights=args.encoder_weights,
+        encoder_img_size=encoder_img_size,
+    ).to(device)
     state = torch.load(Path(weights_path), map_location=device)
     model.load_state_dict(state, strict=True)
     model.eval()
@@ -523,6 +608,8 @@ def parse_args():
                     help="Swin backbone name. If your SMP expects 'tu-*', pass 'tu-swin_tiny_patch4_window7_224'.")
     ap.add_argument("--encoder_weights", type=str, default="imagenet")
     ap.add_argument("--img_size", type=int, default=768)
+    ap.add_argument("--encoder_img_size", type=int, default=None,
+                    help="If set, force the encoder to expect this square resolution (defaults to img_size)")
     ap.add_argument("--batch_size", type=int, default=4)
     ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--lr", type=float, default=1e-4)
