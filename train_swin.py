@@ -63,7 +63,26 @@ def seed_everything(seed=42):
 # ---------------------------
 # CSV helpers
 # ---------------------------
-def detect_id_column(df, candidates=("ImageId","image_id","filename","file_name","id","image","img","name","path")):
+def detect_id_column(
+    df,
+    candidates=(
+        "new_filename",
+        "filename",
+        "file_name",
+        "file",
+        "filepath",
+        "image_path",
+        "image_name",
+        "img_name",
+        "ImageId",
+        "image_id",
+        "id",
+        "image",
+        "img",
+        "name",
+        "path",
+    ),
+):
     for c in candidates:
         if c in df.columns:
             print(f"[info] Using ID column: '{c}'")
