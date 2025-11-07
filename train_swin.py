@@ -41,6 +41,7 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import segmentation_models_pytorch as smp
 from torchmetrics.classification import BinaryF1Score
+from tqdm.auto import tqdm
 
 # plotting (headless-safe)
 import matplotlib
@@ -465,7 +466,14 @@ def train(args):
         model.train()
         run_seg, run_cls, run_total, n_batches = 0.0, 0.0, 0.0, 0
 
-        for x, y, y_cls in train_loader:
+        progress_bar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{args.epochs}",
+            leave=False,
+            total=len(train_loader),
+        )
+
+        for x, y, y_cls in progress_bar:
             x, y, y_cls = x.to(device), y.to(device), y_cls.to(device)
             opt.zero_grad(set_to_none=True)
             with autocast():
@@ -481,6 +489,17 @@ def train(args):
             run_cls += loss_cls.item()
             run_total += loss.item()
             n_batches += 1
+
+            avg_seg = run_seg / max(1, n_batches)
+            avg_cls = run_cls / max(1, n_batches)
+            avg_total = run_total / max(1, n_batches)
+            progress_bar.set_postfix(
+                seg=f"{avg_seg:.4f}",
+                cls=f"{avg_cls:.4f}",
+                total=f"{avg_total:.4f}",
+            )
+
+        progress_bar.close()
 
         # Validation (also returns losses for curves)
         val_metrics = evaluate(model, val_loader, device, cls_loss_weight=args.cls_loss_weight)
